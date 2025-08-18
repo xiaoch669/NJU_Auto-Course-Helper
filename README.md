@@ -18,7 +18,7 @@
 
 2.  **安装本脚本**
     点击下面的链接进行安装：
-    - **[ 从 GitHub 直接安装 ](https://github.com/YOUR_USERNAME/YOUR_REPONAME/raw/main/auto-course-helper.user.js)**
+    - **[ 从 GitHub 直接安装 ](https://github.com/xiaoch669/NIU_Auto-Course-Helper/blob/main/%E5%8D%97%E5%A4%A7%E7%A0%94%E7%A9%B6%E7%94%9F%E6%96%B0%E7%94%9F%E8%AF%BE%E7%A8%8B%E5%8A%A9%E6%89%8B-3.2.user.js))**
 
     点击上方链接后，Tampermonkey会自动弹出安装界面，点击“安装”即可。
 
