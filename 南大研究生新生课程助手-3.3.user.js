@@ -15,8 +15,9 @@
   const log = (...a) => console.log('[TM-课程助手]', ...a);
   const warn = (...a) => console.warn('[TM-课程助手]', ...a);
 
-  // ---------- 默认播放速率（修改这里即可） ----------
-  const DEFAULT_PLAYBACK_RATE = 2; // <- 默认 2 倍速
+  // ---------- 可配置项 ----------
+  const DEFAULT_PLAYBACK_RATE = 2; // <- 默认播放速率（修改为 1.5、2 等）
+  // --------------------------------
 
   // ---------------- 1) 伪装前台 + 阻断事件（尽早执行） ----------------
   (function spoofVisibility() {
@@ -45,103 +46,158 @@
     }
   })();
 
-  // ---------------- 2) 劫持原生媒体 API（在库挂钩之前） ----------------
+  // ---------------- 2) 用户手势检测 ----------------
   let userGesture = false;
   window.addEventListener('pointerdown', () => userGesture = true, true);
   window.addEventListener('keydown',   () => userGesture = true, true);
 
+  // ---------------- 3) 劫持原生媒体 API（在库挂钩之前） ----------------
   (function hijackNativeMedia() {
-    const proto = HTMLMediaElement.prototype;
-    const _pause = proto.pause;
-    const _play  = proto.play;
+    try {
+      const proto = HTMLMediaElement.prototype;
+      const _pause = proto.pause;
+      const _play  = proto.play;
 
-    proto.pause = function (...args) {
-      // 后台强制暂停 → 拦截
-      if (document.hidden && !userGesture) {
-        log('拦截原生 pause 于后台', this);
-        return;
-      }
-      return _pause.apply(this, args);
-    };
-
-    proto.play = function (...args) {
-      // 在尝试播放前确保速率（优先设置为默认速率）
-      try {
-        if (typeof DEFAULT_PLAYBACK_RATE === 'number' && this.playbackRate !== DEFAULT_PLAYBACK_RATE) {
-          this.playbackRate = DEFAULT_PLAYBACK_RATE;
+      proto.pause = function (...args) {
+        if (document.hidden && !userGesture) {
+          log('拦截原生 pause 于后台', this);
+          return;
         }
-      } catch (e) {
-        // 某些自定义播放器或被封装的 media element 可能不允许直接设置，忽略错误
-        // 继续尝试播放
-      }
+        return _pause.apply(this, args);
+      };
 
-      const p = _play.apply(this, args);
-      if (p && typeof p.catch === 'function') {
-        p.catch(err => {
-          // Autoplay 策略：先静音再自启
-          if (err && err.name === 'NotAllowedError') {
-            warn('play() 被策略阻止，尝试静音自启');
-            this.muted = true; this.setAttribute('muted', '');
-            _play.call(this).catch(() => { /* 可能仍需用户点击 */ });
-            needUserClickOverlay();
-          } else {
-            warn('play() 失败:', err && err.name || err);
+      proto.play = function (...args) {
+        // 尝试在 play 前设置默认速率
+        try {
+          if (typeof DEFAULT_PLAYBACK_RATE === 'number' && this.playbackRate !== DEFAULT_PLAYBACK_RATE) {
+            this.playbackRate = DEFAULT_PLAYBACK_RATE;
           }
-        });
-      }
-      return p;
-    };
-    log('原生 HTMLMediaElement.pause/play 已劫持（含默认速率设置）');
+        } catch (e) { /* 忽略 */ }
+
+        const p = _play.apply(this, args);
+        if (p && typeof p.catch === 'function') {
+          p.catch(err => {
+            if (err && err.name === 'NotAllowedError') {
+              warn('play() 被策略阻止，尝试静音自启');
+              try { this.muted = true; this.setAttribute('muted', ''); } catch(e){}
+              _play.call(this).catch(() => {});
+              needUserClickOverlay();
+            } else {
+              warn('play() 失败:', err && err.name || err);
+            }
+          });
+        }
+        return p;
+      };
+
+      log('原生 HTMLMediaElement.pause/play 已劫持（含默认速率设置）');
+    } catch (e) {
+      warn('劫持 HTMLMediaElement 失败', e);
+    }
   })();
 
-  // ---------------- 3) Video.js 层拦截（若存在） ----------------
+  // ---------------- 4) Video.js 层拦截（若存在） ----------------
   (function hijackVideoJS() {
     const tryHook = () => {
-      if (typeof window.videojs !== 'undefined') {
-        const vjs = window.videojs;
-        if (vjs && vjs.Player && vjs.Player.prototype) {
-          const p = vjs.Player.prototype;
-          if (!p.__tm_patched) {
-            p.__tm_patched = true;
-            const _pp = p.pause;
-            p.pause = function (...args) {
-              if (document.hidden && !userGesture) {
-                log('拦截 Video.js pause 于后台', this);
-                return;
-              }
-              return _pp.apply(this, args);
-            };
-            // 额外尝试在 Video.js 层面设置速率（若底层被 video.js 管理）
-            const _play = p.play;
-            p.play = function (...args) {
-              try {
-                // video.js 的 API：player.playbackRate(rate) 或 player.tech().setPlaybackRate(rate)
-                if (typeof this.playbackRate === 'function') {
-                  this.playbackRate(DEFAULT_PLAYBACK_RATE);
-                } else if (this.tech && typeof this.tech === 'function') {
-                  const tech = this.tech(true) || this.tech && this.tech();
-                  if (tech && typeof tech.setPlaybackRate === 'function') {
-                    tech.setPlaybackRate(DEFAULT_PLAYBACK_RATE);
-                  }
-                } else if (this.el_ && this.el_.querySelector) {
-                  const v = this.el_.querySelector('video');
-                  if (v) v.playbackRate = DEFAULT_PLAYBACK_RATE;
-                }
-              } catch (e) { /* 忽略 */ }
-              return _play.apply(this, args);
-            };
+      try {
+        if (typeof window.videojs !== 'undefined') {
+          const vjs = window.videojs;
+          if (vjs && vjs.Player && vjs.Player.prototype) {
+            const p = vjs.Player.prototype;
+            if (!p.__tm_patched) {
+              p.__tm_patched = true;
 
-            log('Video.js Player.pause/play 已劫持，并尝试设置默认速率');
+              // pause 拦截
+              const _pp = p.pause;
+              p.pause = function (...args) {
+                if (document.hidden && !userGesture) {
+                  log('拦截 Video.js pause 于后台', this);
+                  return;
+                }
+                return _pp.apply(this, args);
+              };
+
+              // play 拦截：尝试在 video.js 层设置速率
+              const _play = p.play;
+              p.play = function (...args) {
+                try {
+                  if (typeof this.playbackRate === 'function') {
+                    this.playbackRate(DEFAULT_PLAYBACK_RATE);
+                  } else if (this.tech && typeof this.tech === 'function') {
+                    const tech = this.tech(true) || (this.tech && this.tech());
+                    if (tech && typeof tech.setPlaybackRate === 'function') {
+                      tech.setPlaybackRate(DEFAULT_PLAYBACK_RATE);
+                    }
+                  } else if (this.el_ && this.el_.querySelector) {
+                    const v = this.el_.querySelector('video');
+                    if (v) v.playbackRate = DEFAULT_PLAYBACK_RATE;
+                  }
+                } catch (e) { /* 忽略 */ }
+                return _play.apply(this, args);
+              };
+
+              log('Video.js Player.pause/play 已劫持，并尝试设置默认速率');
+            }
           }
         }
+      } catch (e) {
+        // 若有异常，不影响主流程
       }
     };
-    // 多次尝试，兼容后载入
+
     const t = setInterval(() => { tryHook(); }, 300);
     setTimeout(() => clearInterval(t), 10000);
   })();
 
-  // ---------------- 4) 发现/绑定视频 + 自动化 ----------------
+  // ---------------- 5) 强健的等待与播放工具 ----------------
+  function waitForVideo(timeout = 12000, interval = 250) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const found = document.querySelector('video');
+      if (found) { resolve(found); return; }
+
+      const timer = setInterval(() => {
+        const v = document.querySelector('video');
+        if (v) {
+          clearInterval(timer);
+          resolve(v);
+          return;
+        }
+        if (Date.now() - start > timeout) {
+          clearInterval(timer);
+          resolve(null);
+        }
+      }, interval);
+    });
+  }
+
+  async function robustPlay(video, opts = {}) {
+    if (!video) return false;
+    const maxAttempts = opts.maxAttempts || 6;
+    const baseDelay = opts.baseDelay || 250; // ms
+
+    try { if (typeof DEFAULT_PLAYBACK_RATE === 'number') video.playbackRate = DEFAULT_PLAYBACK_RATE; } catch(e){}
+
+    try { video.playsInline = true; video.setAttribute('playsinline', ''); } catch(e){}
+
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        if (!userGesture && i > 0) {
+          try { video.muted = true; video.setAttribute('muted', ''); } catch(e){}
+        }
+        const p = video.play();
+        if (p && typeof p.then === 'function') {
+          await p;
+        }
+        return true;
+      } catch (err) {
+        await new Promise(r => setTimeout(r, baseDelay * (i + 1)));
+      }
+    }
+    return false;
+  }
+
+  // ---------------- 6) 绑定视频并自动化（改进版） ----------------
   const bindVideo = (video) => {
     if (!video || video.dataset.tmBound) return;
     video.dataset.tmBound = '1';
@@ -151,24 +207,10 @@
       video.setAttribute('playsinline', '');
       video.setAttribute('webkit-playsinline', '');
       video.preload = 'auto';
-    } catch (e) {}
+    } catch(e){}
 
-    // 设置默认播放速率（尽量在元数据就绪时或立即设置）
-    const setDefaultRate = () => {
-      try {
-        if (typeof DEFAULT_PLAYBACK_RATE === 'number') {
-          // 仅设置一次为默认速率，不持续强制覆盖用户行为
-          if (video.playbackRate !== DEFAULT_PLAYBACK_RATE) {
-            video.playbackRate = DEFAULT_PLAYBACK_RATE;
-            log('已设置默认播放速率', DEFAULT_PLAYBACK_RATE, video);
-          }
-        }
-      } catch (e) {
-        warn('设置默认播放速率失败', e);
-      }
-    };
+    try { if (typeof DEFAULT_PLAYBACK_RATE === 'number') video.playbackRate = DEFAULT_PLAYBACK_RATE; } catch(e){}
 
-    // 后台被 pause 时，尝试立即恢复
     const onPause = () => {
       if (document.hidden && !userGesture) {
         log('收到 pause 事件（后台），尝试恢复播放');
@@ -177,46 +219,91 @@
     };
     video.addEventListener('pause', onPause, true);
 
-    // 元数据就绪即尝试启动（静音策略优先）
     const attemptAutoplay = () => {
       if (!video) return;
-      const tryPlay = () => video.play().catch(() => {});
-      // 优先静音自启，降低策略阻挡概率
-      if (!userGesture) {
-        try { video.muted = true; video.setAttribute('muted', ''); } catch(e) {}
-      }
-      setDefaultRate();
-      tryPlay();
+      if (!userGesture) { try { video.muted = true; video.setAttribute('muted',''); } catch(e){} }
+      robustPlay(video).then(ok => {
+        if (!ok) needUserClickOverlay();
+      });
     };
     if (video.readyState > 0) attemptAutoplay();
     else video.addEventListener('loadedmetadata', attemptAutoplay, { once: true });
 
-    // 播放结束 → 自动点击“下一个”
     video.addEventListener('ended', () => {
       log('视频结束，尝试下一节');
       flashTitle('【▶ 播放结束，正在切换下一节】');
-      clickNext();
+      clickNextAndPlay();
     });
 
-    // 如果元素后来改变（例如被播放器替换），仍可重设一次速率
     const obs = new MutationObserver(() => {
-      setDefaultRate();
+      try { if (typeof DEFAULT_PLAYBACK_RATE === 'number') video.playbackRate = DEFAULT_PLAYBACK_RATE; } catch(e){}
     });
-    obs.observe(video, { attributes: true, childList: false, subtree: false });
+    obs.observe(video, { attributes: true });
 
     log('已绑定视频元素', video);
   };
 
-  // 初始扫描 + 监听后续视频
-  const scan = () => document.querySelectorAll('video').forEach(bindVideo);
-  new MutationObserver(() => scan()).observe(document.documentElement, { childList: true, subtree: true });
+  // ---------------- 7) 更高效的 DOM 监听（addedNodes 优先） ----------------
+  const domObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.addedNodes && m.addedNodes.length) {
+        m.addedNodes.forEach(node => {
+          if (!node || node.nodeType !== 1) return;
+          if (node.tagName === 'VIDEO') bindVideo(node);
+          else {
+            try {
+              const v = node.querySelector && node.querySelector('video');
+              if (v) bindVideo(v);
+            } catch(e){}
+          }
+        });
+      }
+    }
+  });
+  domObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+  // 初始扫描（保底）
+  function initialScan() { document.querySelectorAll('video').forEach(bindVideo); }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', scan, { once: true });
-  } else {
-    scan();
+    document.addEventListener('DOMContentLoaded', initialScan, { once: true });
+  } else initialScan();
+
+  // SPA 支持
+  window.addEventListener('hashchange', () => { initialScan(); });
+  window.addEventListener('popstate', () => { initialScan(); });
+
+  // ---------------- 8) 下一节点击 + 跳转后播放 ----------------
+  function clickNext() {
+    const textMatch = Array.from(document.querySelectorAll('button, a, span'))
+      .find(el => /下一个|下一节|下一页|下一项/.test(el.textContent || ''));
+    if (textMatch) { textMatch.click(); return true; }
+
+    const candidates = [
+      '.vjs-next-control', '.next', '[aria-label="Next"]', '.ant-pagination-next', '.next-btn'
+    ].join(',');
+    const el = document.querySelector(candidates);
+    if (el) { el.click(); return true; }
+
+    return false;
   }
 
-  // ---------------- 5) UI 与工具 ----------------
+  async function clickNextAndPlay() {
+    const clicked = clickNext();
+    if (!clicked) return;
+    const video = await waitForVideo(12000, 300);
+    if (!video) {
+      log('跳转后未能找到 video 元素');
+      return;
+    }
+    bindVideo(video);
+    setTimeout(() => {
+      robustPlay(video).then(ok => {
+        if (!ok) needUserClickOverlay();
+      });
+    }, 400);
+  }
+
+  // ---------------- 9) UI 与工具 ----------------
   let overlayShown = false;
   function needUserClickOverlay() {
     if (overlayShown) return;
@@ -226,14 +313,13 @@
     btn.textContent = '▶️ 点击授权播放（解除浏览器限制）';
     btn.addEventListener('click', () => {
       try {
-        // 尝试激活音频上下文，增强后台保活
         const Ctx = window.AudioContext || window.webkitAudioContext;
         if (Ctx) {
           const ctx = new Ctx();
           ctx.resume && ctx.resume();
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
-          gain.gain.value = 0; // 静音
+          gain.gain.value = 0;
           osc.connect(gain);
           gain.connect(ctx.destination);
           osc.start();
@@ -242,34 +328,17 @@
       } catch (e) {
         warn('启动后台保活失败', e);
       }
-      userGesture = true; // 已有用户手势
+      userGesture = true;
       btn.remove();
       overlayShown = false;
 
-      // 让当前视频“带声”恢复（如你需要）
       const v = document.querySelector('video');
       if (v) {
-        try { v.muted = false; v.removeAttribute('muted'); } catch(e) {}
+        try { v.muted = false; v.removeAttribute('muted'); } catch(e){}
         v.play().catch(() => {});
       }
     });
     document.documentElement.appendChild(btn);
-  }
-
-  function clickNext() {
-    // 1) 明文按钮
-    const textMatch = Array.from(document.querySelectorAll('button, a, span'))
-      .find(el => /下一个|下一节|下一页|下一项/.test(el.textContent || ''));
-    if (textMatch) { textMatch.click(); return true; }
-
-    // 2) 常见播放器“下一集”按钮
-    const candidates = [
-      '.vjs-next-control', '.next', '[aria-label="Next"]', '.ant-pagination-next', '.next-btn'
-    ].join(',');
-    const el = document.querySelector(candidates);
-    if (el) { el.click(); return true; }
-
-    return false;
   }
 
   let flasher;
