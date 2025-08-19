@@ -8,7 +8,6 @@
 // @grant        GM_addStyle
 // @run-at       document-start
 // ==/UserScript==
-
 (function () {
   'use strict';
 
